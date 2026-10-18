@@ -16,7 +16,7 @@
 ## 1. 빠른 시작
 
 ```bash
-cd rl_grasp_sim
+cd ur5-rg2-grasp-rl
 pip install -r requirements.txt          # numpy, pyyaml, gymnasium, matplotlib, torch
 
 python tests/test_core.py                # 물리/기구학/URDF/환경 검사 (몇 초)
@@ -44,7 +44,7 @@ python scripts/visualize.py --algo qlearning --model results/compare/qlearning_s
 ## 2. 폴더 구조
 
 ```
-rl_grasp_sim/
+ur5-rg2-grasp-rl/
 ├── configs/
 │   ├── default.yaml          ★ 모든 파라미터 (로봇·그리퍼·카메라·물체·State·Action·Reward·알고리즘)
 │   └── isaac.yaml            Isaac Sim 실행용 덮어쓰기
@@ -298,7 +298,7 @@ Q-learning 과 기본 DQN 은 같은 인식 파이프라인(depth → 물체 분
 # Isaac Sim 설치 폴더의 python 으로 의존성 설치 (한 번)
 ~/isaacsim/python.sh -m pip install gymnasium pyyaml matplotlib pillow
 
-cd rl_grasp_sim
+cd ur5-rg2-grasp-rl
 # (1) 내장 물리로 빠르게 학습한 정책을 Isaac Sim 에서 평가 (sim-to-sim 전이)
 ~/isaacsim/python.sh scripts/evaluate.py --config configs/isaac.yaml \
     --algo qlearning --model results/main/qlearning_seed0/q_table.npz --episodes 20
