@@ -16,6 +16,7 @@
 ## 1. 빠른 시작
 
 ```bash
+git clone https://github.com/kitech3178/ur5-rg2-grasp-rl.git
 cd ur5-rg2-grasp-rl
 pip install -r requirements.txt          # numpy, pyyaml, gymnasium, matplotlib, torch
 
