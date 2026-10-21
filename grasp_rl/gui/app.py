@@ -140,6 +140,8 @@ class MainWindow(QMainWindow):
         self.fields = {}          # config key -> widget
         self.proc = self.q = self.stop_evt = self.live = None
         self.job_kind = None
+        self.snap_proc = self.snap_q = None
+        self.snap_pending = False
         self.ep_rows, self.ev_rows = [], []
         self.last_plot = 0.0
         self.plot_cost = 0.0
@@ -159,6 +161,14 @@ class MainWindow(QMainWindow):
         self._algo_changed()
         self._setup_plots()
         self._refresh_runs()
+
+        # show the robot in its start pose right away, and again when the scene settings change
+        self.snap_timer = QTimer(self)
+        self.snap_timer.setSingleShot(True)
+        self.snap_timer.timeout.connect(self._request_snapshot)
+        self.backend_box.currentIndexChanged.connect(lambda: self.snap_timer.start(300))
+        self.seed_spin.valueChanged.connect(lambda: self.snap_timer.start(300))
+        QTimer.singleShot(0, self._request_snapshot)
 
     # ------------------------------------------------------------ settings
     def _spin(self, key, value):
@@ -529,7 +539,48 @@ class MainWindow(QMainWindow):
             self.policy_box.setCurrentIndex(2)
 
     # ------------------------------------------------------------ messages
+    # ------------------------------------------------------------ start-state snapshot
+    def _request_snapshot(self):
+        if self.proc is not None:                  # a job is running: its own frames are shown
+            return
+        if self.snap_proc is not None:             # one at a time; redo once it finishes
+            self.snap_pending = True
+            return
+        seed = self.seed_spin.value()
+        job = {"overrides": [f"backend={self.backend_box.currentText()}"],
+               "seed": seed * 10_000_000 + 1,      # = the first training episode (train_loop)
+               "train_seed": seed}
+        for v in (self.scene_view, self.depth_view, self.rgb_view):
+            if v.img is None:
+                v.setText("로봇 모델 불러오는 중…")
+        ctx = mp.get_context("spawn")
+        self.snap_q = ctx.Queue()
+        self.snap_proc = ctx.Process(target=worker.snapshot_worker, args=(job, self.snap_q), daemon=True)
+        self.snap_proc.start()
+
+    def _poll_snapshot(self):
+        if self.snap_q is None:
+            return
+        try:
+            kind, data = self.snap_q.get_nowait()
+        except queue.Empty:
+            if self.snap_proc.is_alive():
+                return
+            kind, data = "error", "snapshot process exited"
+        if kind == "frame":
+            if self.proc is None:
+                self._show_frame(data)
+            return
+        if kind == "error":
+            self._log(f"초기 화면을 그리지 못했습니다:\n{data}")
+        self.snap_proc.join(timeout=1)
+        self.snap_proc = self.snap_q = None
+        if self.snap_pending:
+            self.snap_pending = False
+            self._request_snapshot()
+
     def _poll(self):
+        self._poll_snapshot()
         if self.q is None:
             return
         frame = None
@@ -603,10 +654,15 @@ class MainWindow(QMainWindow):
         terms = "  ".join(f"{k} {v:+.2f}" for k, v in f["terms"].items()) or "-"
         d = f["depth"]
         dv = d[d > 0]
+        if f.get("snapshot"):
+            head = (f"초기 상태 ({f['snapshot']}) — 로봇 시작 자세, 그리퍼 열림. "
+                    f"학습 첫 에피소드가 이 상태에서 시작합니다.\n\n")
+        else:
+            head = (f"에피소드 {f['episode']}  스텝 {f['step']:2d}  행동 {f['action']:<6}  "
+                    f"보상 {f['reward']:+7.2f}  누적 {f['ret']:+7.2f}   "
+                    f"이벤트 {', '.join(f['events']) or '-'}\n보상 구성: {terms}\n")
         self.info.setText(
-            f"에피소드 {f['episode']}  스텝 {f['step']:2d}  행동 {f['action']:<6}  "
-            f"보상 {f['reward']:+7.2f}  누적 {f['ret']:+7.2f}   이벤트 {', '.join(f['events']) or '-'}\n"
-            f"보상 구성: {terms}\n"
+            head +
             f"카메라 인식 : {feat(f['perceived'])}\n"
             f"참값        : {feat(f['gt'])}\n"
             f"depth 범위 {dv.min() * 100 if dv.size else 0:.1f}–{dv.max() * 100 if dv.size else 0:.1f} cm, "
@@ -678,6 +734,8 @@ class MainWindow(QMainWindow):
             a.grid(alpha=0.3)
             a.set_xlabel("episode", fontsize=8)
             a.tick_params(labelsize=8)
+            a.set_xlim(0, self.episodes_spin.value())      # empty panels: planned episode range
+            a.set_ylim(0, 1)
         for i, key, title, color in self.SERIES:
             raw, = ax[i].plot([], [], color=color, alpha=0.15, lw=0.8)
             ma, = ax[i].plot([], [], color=color, lw=2)
@@ -688,6 +746,8 @@ class MainWindow(QMainWindow):
         ax[1].set_ylim(-0.03, 1.03)
         ax[1].set_title("Greedy evaluation success rate", fontsize=10)
         ax[5].set_title("Outcomes (last 20% of episodes)", fontsize=10)
+        ax[5].set_xlabel("")
+        ax[5].set_xticks([])
         self.outcome_names = None
         self.canvas.fig.suptitle(self.run_label, fontsize=11)
         self.canvas.relayout()
@@ -786,6 +846,8 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {text}")
 
     def closeEvent(self, event):
+        if self.snap_proc is not None:
+            self.snap_proc.terminate()
         if self.proc is not None:
             self.stop_evt.set()
             self.proc.join(timeout=3)

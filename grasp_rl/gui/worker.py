@@ -1,4 +1,5 @@
-"""Background jobs for the GUI: training and step-by-step policy preview.
+"""Background jobs for the GUI: training, step-by-step policy preview and the
+start-state snapshot shown while the window is idle.
 
 Each job runs in its own process (multiprocessing 'spawn') so the simulator's
 OpenGL context and the CPU-heavy learning loop never block the Qt window.
@@ -130,6 +131,24 @@ def preview_worker(job, q, stop, live):
             outcome = "success" if info["success"] else info.get("grasp_reason", "timeout")
             q.put(("preview_episode", {"episode": i + 1, "outcome": outcome, "return": ret,
                                        "length": info["step"]}))
+        env.close()
+        q.put(("done", None))
+    except Exception:  # noqa: BLE001
+        q.put(("error", traceback.format_exc()))
+
+
+def snapshot_worker(job, q):
+    """One frame of the start state (robot at home, object on the table) so the
+    idle window already shows the scene before any training or test runs."""
+    try:
+        from grasp_rl.config import load_config
+        from grasp_rl.envs import GraspEnv
+
+        cfg = load_config(None, job["overrides"])
+        env = GraspEnv(cfg, "discrete")
+        _, info = env.reset(seed=int(job["seed"]))
+        q.put(("frame", _frame(env, info, _Display(cfg), episode=0, reward=0.0, ret=0.0,
+                               snapshot=f"{cfg.backend}, 시드 {job['train_seed']}")))
         env.close()
         q.put(("done", None))
     except Exception:  # noqa: BLE001
