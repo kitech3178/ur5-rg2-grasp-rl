@@ -4,4 +4,5 @@ gymnasium>=0.29
 matplotlib>=3.7
 pillow>=9.0
 torch>=2.0        # DQN only
+mujoco>=3.2       # backend: mujoco only
 pytest>=7.0       # tests only

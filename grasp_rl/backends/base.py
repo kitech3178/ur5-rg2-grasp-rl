@@ -80,7 +80,10 @@ def make_backend(cfg) -> Backend:
     if cfg.backend == "simple":
         from grasp_rl.backends.simple_backend import SimpleBackend
         return SimpleBackend(cfg)
+    if cfg.backend == "mujoco":
+        from grasp_rl.backends.mujoco_backend import MujocoBackend
+        return MujocoBackend(cfg)
     if cfg.backend == "isaac":
         from grasp_rl.backends.isaac_backend import IsaacBackend
         return IsaacBackend(cfg)
-    raise ValueError(f"unknown backend {cfg.backend!r} (simple | isaac)")
+    raise ValueError(f"unknown backend {cfg.backend!r} (simple | mujoco | isaac)")

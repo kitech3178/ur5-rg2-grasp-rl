@@ -5,8 +5,9 @@
 * 로봇: **UR5** (표준 DH 파라미터, 수치 역기구학)
 * 그리퍼: **OnRobot RG2** (스트로크 0–110 mm, 파지력 3–40 N, 마찰·미끄러짐 물리 모델)
 * 센서: 그리퍼에 장착한 **depth 카메라** (Intel RealSense D405 급, 노이즈 모델 포함)
-* 시뮬레이터 두 가지 (같은 MDP, 같은 에이전트 코드)
+* 시뮬레이터 세 가지 (같은 MDP, 같은 에이전트 코드)
   * `simple` — 이 저장소의 **물리 모델**(numpy). 설치 즉시 동작, 한 스텝 ≈ 2 ms
+  * `mujoco` — **MuJoCo** 강체 동역학 + 접촉/마찰 + OpenGL depth 카메라. pip 설치, CPU 동작 (7장)
   * `isaac` — **NVIDIA Isaac Sim**(PhysX + RTX depth 카메라). URDF는 설정 파일에서 자동 생성
 * **State / Action / Reward 와 모든 하이퍼파라미터는 `configs/default.yaml` 하나**에서 바꾸고,
   명령줄 `--set key=value` 로 즉석에서 덮어쓸 수 있습니다.
@@ -61,7 +62,7 @@ ur5-rg2-grasp-rl/
 │   │   ├── state.py          ★ STATE 정의 (discrete / features / depth)
 │   │   ├── reward.py         ★ REWARD 정의 (희소 보상 + 페널티 + 퍼텐셜 셰이핑)
 │   │   └── grasp_env.py      Gymnasium 환경 (위 셋을 묶음)
-│   ├── backends/             simple(내장 물리) / isaac(Isaac Sim) 시뮬레이터 교체 계층
+│   ├── backends/             simple(내장 물리) / mujoco(MuJoCo) / isaac(Isaac Sim) 시뮬레이터 교체 계층
 │   ├── agents/
 │   │   ├── q_learning.py     표 기반 Q-learning
 │   │   ├── dqn.py            DQN (+Double DQN, n-step, 타깃망, 리플레이 버퍼, CNN/MLP)
@@ -69,7 +70,7 @@ ur5-rg2-grasp-rl/
 │   ├── train_loop.py         학습·평가·로그 공통 루프
 │   ├── analysis.py           비교 그래프와 표 생성
 │   ├── render.py             3D 로봇 / 상면도 / depth 이미지 렌더링
-│   └── urdf.py               설정 → UR5+RG2+카메라 URDF 생성 (Isaac Sim 용 물리 모델)
+│   └── urdf.py               설정 → UR5+RG2+카메라 URDF 생성 (MuJoCo / Isaac Sim 용 물리 모델)
 ├── scripts/  train.py · compare.py · sweep.py · evaluate.py · visualize.py · play.py · make_urdf.py
 ├── assets/urdf/ur5_rg2.urdf  생성된 URDF (질량·관성·관절 한계·충돌 형상 포함)
 └── tests/test_core.py
@@ -282,9 +283,40 @@ Q-learning 과 기본 DQN 은 같은 인식 파이프라인(depth → 물체 분
 
 ---
 
-## 7. Isaac Sim 에서 실행하기
+## 7. MuJoCo 에서 실행하기 (GPU 불필요)
 
 ### 7.1 구성
+* `backends/mujoco_backend.py` 가 `grasp_rl/urdf.py` 로 만든 **같은 URDF** 를 MuJoCo로 불러와
+  (`MjSpec`) 위치 서보 액추에이터, 테이블, 물체(자유 강체), 손목 depth 카메라를 덧붙입니다.
+* 행동 → TCP 목표 → **같은 UR5 IK** → 관절 위치 목표를 관절공간에서 보간 (`mujoco.move_speed`), 팔은 중력 보상.
+* 손가락은 RG2 닫힘 속도로 움직이는 위치 서보이고 **힘을 `gripper.force` 로 제한** → 접촉·마찰(비틀림 마찰 포함,
+  elliptic cone)·미끄러짐·낙하는 MuJoCo가 계산합니다. 들어올리기는 `task.lift_max_speed`/`lift_accel` 사다리꼴 속도.
+* depth 카메라는 같은 내부 파라미터·장착 위치로 OpenGL 렌더링 후 simple 백엔드와 **같은 노이즈 모델**을 적용합니다
+  (레이캐스팅 결과와의 차이 중앙값 ≈ 0.3 mm, `tests/test_core.py::test_mujoco_backend`).
+* 마찰 조합: 손가락–물체 접촉은 물체의 μs, 물체–테이블 접촉은 `object.table_friction`. MuJoCo는 정지/운동 마찰을
+  구분하지 않으므로 `kinetic_ratio` 는 쓰이지 않습니다.
+* 실패 판정은 물체가 실제로 들린 높이로 합니다 (`no_lift` / `dropped`). simple 백엔드처럼 원인
+  (`rotational_slip` 등)을 해석적으로 구분하지는 않습니다.
+
+### 7.2 실행
+```bash
+pip install mujoco                                    # requirements.txt 에 포함
+python scripts/evaluate.py --policy scripted --episodes 50 --backend mujoco      # ~5 s
+python scripts/train.py --algo qlearning --backend mujoco                        # simple 대비 수 배 느림
+# 내장 물리로 학습한 정책을 MuJoCo 에서 평가 (sim-to-sim 전이)
+python scripts/evaluate.py --algo qlearning --model results/<실험>/q_table.npz --backend mujoco
+# 3D 뷰어로 보기 (실시간 재생)
+python scripts/evaluate.py --policy scripted --episodes 3 --backend mujoco --set mujoco.viewer=true
+```
+* 파라미터는 `configs/default.yaml` 의 `mujoco:` 섹션 (물리 스텝, 서보 이득, 이동 속도, 유지 시간 등).
+* 오프스크린 렌더링은 `MUJOCO_GL` 을 씁니다. 기본값은 화면이 있으면 `glfw`(창은 뜨지 않음), 없으면 `egl`.
+  서버처럼 화면이 없는데 EGL이 안 되면 `sudo apt install libosmesa6` 후 `--set mujoco.gl=osmesa`.
+
+---
+
+## 8. Isaac Sim 에서 실행하기
+
+### 8.1 구성
 * `grasp_rl/urdf.py` 가 **현재 설정으로 UR5 + RG2 + 카메라 URDF** 를 만듭니다
   (DH 표에서 바로 관절 원점을 만들어 내장 기구학과 정확히 일치 — `tests/test_core.py::test_urdf_matches_dh` 로 검증).
   링크 질량은 ur_description 값, 형상은 단순화된 원통/상자입니다.
@@ -294,7 +326,7 @@ Q-learning 과 기본 DQN 은 같은 인식 파이프라인(depth → 물체 분
   프리즘 관절 드라이브라서 **접촉·마찰·미끄러짐은 PhysX가 계산**합니다.
 * MDP(State/Action/Reward), 에이전트, 로그 형식은 simple 백엔드와 완전히 동일합니다.
 
-### 7.2 실행
+### 8.2 실행
 ```bash
 # Isaac Sim 설치 폴더의 python 으로 의존성 설치 (한 번)
 ~/isaacsim/python.sh -m pip install gymnasium pyyaml matplotlib pillow
@@ -310,7 +342,7 @@ cd ur5-rg2-grasp-rl
 Windows 는 `python.bat`. URDF만 확인하려면 `python scripts/make_urdf.py` 후 Isaac Sim GUI의
 *File → Import* 로 `assets/urdf/ur5_rg2.urdf` 를 불러오면 됩니다.
 
-### 7.3 주의 (검증 범위)
+### 8.3 주의 (검증 범위)
 * Isaac Sim 백엔드는 Isaac Sim 4.x/5.x 의 `isaacsim.*` API 와 2023.1 의 `omni.isaac.*` API를 모두 시도하도록
   작성했지만, **이 저장소의 개발 환경에는 GPU/Isaac Sim이 없어 실제 실행 검증은 하지 못했습니다.**
   내장 물리 백엔드, 기구학, URDF 일관성은 테스트로 검증되어 있습니다.
@@ -320,7 +352,7 @@ Windows 는 `python.bat`. URDF만 확인하려면 `python scripts/make_urdf.py` 
 
 ---
 
-## 8. 참고문헌
+## 9. 참고문헌
 * Watkins & Dayan (1992), *Q-learning*. Machine Learning 8.
 * Mnih et al. (2015), *Human-level control through deep reinforcement learning*. Nature 518.
 * van Hasselt, Guez & Silver (2016), *Deep Reinforcement Learning with Double Q-learning*. AAAI.
