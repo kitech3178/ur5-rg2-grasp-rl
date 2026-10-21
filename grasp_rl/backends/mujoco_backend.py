@@ -92,11 +92,13 @@ class MujocoBackend(Backend):
         c = cfg.camera
         self.renderer = mujoco.Renderer(m, int(c.height), int(c.width))
         self.renderer.enable_depth_rendering()
+        self.renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SKYBOX] = 0
         self.scene_opt = mujoco.MjvOption()
         self.scene_opt.geomgroup[:] = 0
         self.scene_opt.geomgroup[GROUP_SCENE] = 1
         if mc.render_robot_in_depth:
             self.scene_opt.geomgroup[GROUP_ROBOT_VISUAL] = 1
+        self._rgb = None                          # display renderers, created on first use
 
         self.viewer = None
         if mc.viewer:
@@ -120,6 +122,13 @@ class MujocoBackend(Backend):
         spec.stat.extent = 1.0
         spec.visual.map.znear = 0.01                 # x extent -> 1 cm near clip
         spec.visual.map.zfar = 5.0
+        # display only (GUI): larger off-screen buffer, brighter light, sky backdrop
+        spec.visual.global_.offwidth, spec.visual.global_.offheight = 960, 720
+        spec.visual.headlight.ambient = [0.35, 0.35, 0.35]
+        spec.visual.headlight.diffuse = [0.55, 0.55, 0.55]
+        spec.add_texture(name="sky", type=mujoco.mjtTexture.mjTEXTURE_SKYBOX,
+                         builtin=mujoco.mjtBuiltin.mjBUILTIN_GRADIENT,
+                         rgb1=[0.75, 0.82, 0.9], rgb2=[0.25, 0.28, 0.33], width=256, height=1536)
 
         # robot: no self collision, gravity compensated, armature for stiff servos
         for body in spec.bodies:
@@ -343,7 +352,48 @@ class MujocoBackend(Backend):
     def object_state(self):
         return self._read_object()[0]
 
+    def show_state(self, q_arm, obj, finger_width=None):
+        """Pose the model kinematically (no physics step), e.g. to draw the state of
+        another backend such as `simple` in the GUI."""
+        self.obj = obj
+        self._set_object_params(obj)
+        d = self.data
+        d.qpos[self.arm_qadr] = q_arm
+        w = self.gripper.open_width if finger_width is None else finger_width
+        d.qpos[self.fin_qadr] = w / 2
+        a = self.obj_qadr
+        d.qpos[a:a + 3] = [obj.x, obj.y, obj.height / 2]
+        d.qpos[a + 3:a + 7] = [np.cos(obj.yaw / 2), 0, 0, np.sin(obj.yaw / 2)]
+        self.mj.mj_forward(self.model, d)
+
+    def _display_renderers(self):
+        if self._rgb is None:
+            mj = self.mj
+            opt = mj.MjvOption()
+            opt.geomgroup[:] = 0
+            opt.geomgroup[GROUP_SCENE] = opt.geomgroup[GROUP_ROBOT_VISUAL] = 1
+            cam = mj.MjvCamera()
+            cx, cy = self.cfg.object.spawn_center
+            cam.lookat[:] = [cx * 0.55, cy, 0.2]
+            cam.distance, cam.azimuth, cam.elevation = 1.35, 140.0, -22.0
+            self._rgb = dict(cam=mj.Renderer(self.model, 240, 320), scene=mj.Renderer(self.model, 540, 960),
+                             opt=opt, view=cam)
+        return self._rgb
+
+    def camera_rgb(self):
+        r = self._display_renderers()
+        r["cam"].update_scene(self.data, camera=self.cam_id, scene_option=r["opt"])
+        return r["cam"].render().copy()
+
+    def scene_rgb(self):
+        r = self._display_renderers()
+        r["scene"].update_scene(self.data, camera=r["view"], scene_option=r["opt"])
+        return r["scene"].render().copy()
+
     def close(self):
         if self.viewer is not None:
             self.viewer.close()
+        if self._rgb is not None:
+            self._rgb["cam"].close()
+            self._rgb["scene"].close()
         self.renderer.close()

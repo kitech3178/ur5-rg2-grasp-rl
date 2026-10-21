@@ -72,6 +72,15 @@ class Backend(ABC):
     def object_state(self):
         """Ground-truth TableObject (pose, size, mass, friction)."""
 
+    # -- optional, for display only ---------------------------------------
+    def camera_rgb(self):
+        """(H, W, 3) uint8 colour view of the wrist camera, or None if not available."""
+        return None
+
+    def scene_rgb(self):
+        """(H, W, 3) uint8 overview of the robot and table, or None if not available."""
+        return None
+
     def close(self):
         pass
 

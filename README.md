@@ -29,6 +29,8 @@ python scripts/train.py --algo qlearning                     # ~3분 (CPU)
 python scripts/train.py --algo dqn                           # 기본: 인식 특징 벡터 입력(MLP)
 python scripts/compare.py --algos qlearning dqn --seeds 0 1 2 # 리포트용 비교
 python scripts/visualize.py --algo qlearning --model results/compare/qlearning_seed0/q_table.npz
+
+python scripts/gui.py                    # GUI: 설정·학습·카메라·보상 테스트·그래프를 한 화면에서 (1.1절)
 ```
 
 결과는 `results/<실험이름>/` 에 저장됩니다.
@@ -40,6 +42,22 @@ python scripts/visualize.py --algo qlearning --model results/compare/qlearning_s
 | `summary.json` | 최종 성능, 학습 시간, 파라미터 수(Q-table 크기 vs 신경망 가중치 수) |
 | `comparison.png`, `summary.md` | `compare.py`/`sweep.py` 가 만드는 비교 그래프와 표 |
 | `config.yaml` | 그 실행에 사용된 전체 설정 (재현용) |
+
+### 1.1 GUI 프로그램 (`scripts/gui.py`)
+
+명령줄 대신 창 하나에서 설정 → 학습 → 결과 확인까지 할 수 있습니다 (PySide6, `requirements.txt` 에 포함).
+
+| 영역 | 기능 |
+|---|---|
+| 왼쪽 **실험 설정** | 시뮬레이터(simple / mujoco), 알고리즘(Q-learning / DQN, DQN 입력 features / depth), 학습 에피소드 수, 평가 주기, 시드. 에피소드 수를 바꾸면 ε 감소 구간과 평가 주기가 비례해서 자동 조정됩니다 (직접 수정 가능). |
+| 왼쪽 **파라미터 / 보상** | 알고리즘별 학습률·γ 등과 보상 값 전체(성공·실패·스텝 비용·충돌·IK 실패·작업영역 이탈, 종료 조건, 셰이핑 가중치). 항목에 마우스를 올리면 설명이 나옵니다. |
+| 위 **카메라 화면** | 손목 **depth 카메라**(에이전트가 실제로 받는 입력, 노이즈 포함), MuJoCo일 때 **손목 컬러 카메라**와 **로봇 전체 장면**, 그리고 현재 스텝의 행동·보상 구성·카메라 인식값 vs 참값. 학습 중에는 `화면 갱신 (Hz)` 만큼 갱신되고, `스텝 지연`을 주면 천천히 볼 수 있습니다. |
+| **결과 그래프** 탭 | 학습 중 실시간으로 그려지고, 끝나면 최종 평가 성공률·학습 시간·저장 위치를 표시합니다 (학습 성공률, greedy 평가 성공률, 과제 리턴, 에피소드 길이, ε, 결과 분포). |
+| **보상 테스트** 탭 | 정답 제어기 / 무작위 / 학습된 모델로 몇 에피소드를 **현재 보상 값으로** 실행하고, 스텝마다 보상이 어떻게 계산되는지 표로 보여줍니다 (학습하지 않음). 보상 값을 바꿔 가며 바로 비교할 수 있습니다. |
+| **결과 비교** 탭 | `results/` 아래 학습 결과를 체크해서 그래프와 표로 비교합니다 (예: 보상 값만 바꾼 두 실험). |
+
+GUI에서 학습한 결과는 `results/gui/<실험 이름>/` 에 명령줄과 같은 형식으로 저장됩니다.
+`■ 중지` 를 누르면 진행 중인 에피소드를 마치고 그때까지의 모델·로그를 저장합니다.
 
 ---
 
@@ -67,11 +85,12 @@ ur5-rg2-grasp-rl/
 │   │   ├── q_learning.py     표 기반 Q-learning
 │   │   ├── dqn.py            DQN (+Double DQN, n-step, 타깃망, 리플레이 버퍼, CNN/MLP)
 │   │   └── scripted.py       정답 제어기 / 무작위 정책 (기준선)
+│   ├── gui/                  GUI (app.py: 메인 창, worker.py: 학습/보상 테스트 백그라운드 프로세스)
 │   ├── train_loop.py         학습·평가·로그 공통 루프
 │   ├── analysis.py           비교 그래프와 표 생성
 │   ├── render.py             3D 로봇 / 상면도 / depth 이미지 렌더링
 │   └── urdf.py               설정 → UR5+RG2+카메라 URDF 생성 (MuJoCo / Isaac Sim 용 물리 모델)
-├── scripts/  train.py · compare.py · sweep.py · evaluate.py · visualize.py · play.py · make_urdf.py
+├── scripts/  gui.py · train.py · compare.py · sweep.py · evaluate.py · visualize.py · play.py · make_urdf.py
 ├── assets/urdf/ur5_rg2.urdf  생성된 URDF (질량·관성·관절 한계·충돌 형상 포함)
 └── tests/test_core.py
 ```
