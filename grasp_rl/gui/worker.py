@@ -8,6 +8,9 @@ Messages go back through a queue as (kind, payload) tuples:
     episode  one row of episodes.csv          eval  one row of eval.csv
     step     one preview transition           preview_episode  preview result
     done     final summary                    error  traceback text
+
+`live` is a shared array [frame_hz, step_delay_s] the GUI updates while a job
+runs, so the live-view settings take effect immediately.
 """
 
 from __future__ import annotations
@@ -22,21 +25,39 @@ def _feat(f):
     return {"dx": f.dx, "dy": f.dy, "dz": f.dz, "yaw": f.yaw}
 
 
-def _make_display(cfg):
-    """A MuJoCo model used only to draw backends without a renderer of their own (simple)."""
-    if cfg.backend == "mujoco":
-        return None
-    try:
-        from grasp_rl.backends.mujoco_backend import MujocoBackend
-        return MujocoBackend(cfg)
-    except Exception:  # noqa: BLE001 - mujoco not installed / no OpenGL: depth view only
-        return None
+class _Display:
+    """A MuJoCo model used only to draw backends without a renderer of their own
+    (simple). Built on first use, so it also appears when the live view is
+    switched on in the middle of training."""
+
+    def __init__(self, cfg):
+        self.cfg, self.model, self.tried = cfg, None, cfg.backend == "mujoco"
+
+    def get(self):
+        if not self.tried:
+            self.tried = True
+            try:
+                from grasp_rl.backends.mujoco_backend import MujocoBackend
+                self.model = MujocoBackend(self.cfg)
+            except Exception:  # noqa: BLE001 - mujoco not installed / no OpenGL: depth view only
+                self.model = None
+        return self.model
 
 
-def _frame(env, info, display=None, **extra):
+def _sleep_live(live, stop, t0):
+    """Wait until `live` step delay has passed since t0; re-reads the delay so a
+    change in the GUI applies to the step that is already waiting."""
+    while not stop.is_set():
+        left = float(live[1]) - (time.time() - t0)
+        if left <= 0:
+            return
+        time.sleep(min(left, 0.05))
+
+
+def _frame(env, info, display, **extra):
     b, last = env.backend, env.last
     cam, scene = b.camera_rgb(), b.scene_rgb()
-    if scene is None and display is not None:
+    if scene is None and (display := display.get()) is not None:
         display.show_state(b.joint_positions(), b.object_state())
         cam, scene = display.camera_rgb(), display.scene_rgb()
     return {"depth": last["depth"], "cam_rgb": cam, "scene_rgb": scene,
@@ -45,25 +66,24 @@ def _frame(env, info, display=None, **extra):
             "terms": info.get("reward_terms", {}), "events": info.get("events", []), **extra}
 
 
-def train_worker(job, q, stop):
+def train_worker(job, q, stop, live):
     try:
         from grasp_rl.config import load_config
         from grasp_rl.train_loop import train
 
         cfg = load_config(None, job["overrides"])
-        hz, delay = float(job["frame_hz"]), float(job["step_delay"])
-        display = _make_display(cfg) if hz > 0 else None
+        display = _Display(cfg)
         st = {"t": 0.0, "ep": 0, "ret": 0.0}
 
         def recorder(env, a, r, info):
             st["ret"] = r if info["step"] == 1 else st["ret"] + r
             now = time.time()
+            hz, delay = float(live[0]), float(live[1])
             if hz > 0 and (delay > 0 or now - st["t"] >= 1.0 / hz):
                 st["t"] = now
                 q.put(("frame", _frame(env, info, display, episode=st["ep"] + 1, reward=r,
                                        ret=st["ret"])))
-            if delay > 0:
-                time.sleep(delay)
+            _sleep_live(live, stop, now)
 
         def callback(kind, row):
             if kind == "episode":
@@ -78,7 +98,7 @@ def train_worker(job, q, stop):
         q.put(("error", traceback.format_exc()))
 
 
-def preview_worker(job, q, stop):
+def preview_worker(job, q, stop, live):
     """Run a few greedy episodes and stream every step (for checking rewards)."""
     try:
         from grasp_rl.agents import make_agent, observation_mode
@@ -88,11 +108,10 @@ def preview_worker(job, q, stop):
         cfg = load_config(None, job["overrides"])
         algo = job["policy"]
         env = GraspEnv(cfg, observation_mode(algo, cfg))
-        display = _make_display(cfg)
+        display = _Display(cfg)
         agent = make_agent(algo, cfg, env)
         if job.get("model"):
             agent.load(job["model"])
-        delay = float(job["step_delay"])
         for i in range(int(job["episodes"])):
             if stop.is_set():
                 break
@@ -105,7 +124,7 @@ def preview_worker(job, q, stop):
                 q.put(("frame", _frame(env, info, display, episode=i + 1, reward=r, ret=ret)))
                 q.put(("step", {"episode": i + 1, "step": info["step"], "action": info["action_name"],
                                 "reward": r, "terms": info["reward_terms"], "events": info["events"]}))
-                time.sleep(delay)
+                _sleep_live(live, stop, time.time())
                 if te or tr or stop.is_set():
                     break
             outcome = "success" if info["success"] else info.get("grasp_reason", "timeout")

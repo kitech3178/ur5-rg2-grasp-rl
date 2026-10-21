@@ -116,9 +116,18 @@ class ImageView(QLabel):
 
 class PlotCanvas(FigureCanvasQTAgg):
     def __init__(self, rows=2, cols=3):
-        self.fig = Figure(figsize=(9, 5), tight_layout=True)
+        self.fig = Figure(figsize=(9, 5))
         super().__init__(self.fig)
         self.axes = self.fig.subplots(rows, cols).ravel()
+
+    def relayout(self):
+        """Recompute margins (slow, ~50 ms) — only on setup, resize and new labels."""
+        self.fig.tight_layout()
+        self.draw()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fig.tight_layout()
 
 
 # ======================================================================
@@ -129,10 +138,11 @@ class MainWindow(QMainWindow):
         self.resize(1500, 950)
         self.defaults = load_config()
         self.fields = {}          # config key -> widget
-        self.proc = self.q = self.stop_evt = None
+        self.proc = self.q = self.stop_evt = self.live = None
         self.job_kind = None
         self.ep_rows, self.ev_rows = [], []
         self.last_plot = 0.0
+        self.plot_cost = 0.0
         self.plot_dirty = False
         self.prev_results = []
         self.run_label = ""
@@ -147,6 +157,7 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self._poll)
         self.timer.start(50)
         self._algo_changed()
+        self._setup_plots()
         self._refresh_runs()
 
     # ------------------------------------------------------------ settings
@@ -237,8 +248,13 @@ class MainWindow(QMainWindow):
         self.delay_spin.setRange(0, 2000)
         self.delay_spin.setSuffix(" ms")
         self.delay_spin.setToolTip("매 스텝 대기 시간 — 로봇 움직임을 눈으로 따라가고 싶을 때 (학습이 느려짐)")
+        self.hz_spin.valueChanged.connect(self._live_changed)
+        self.delay_spin.valueChanged.connect(self._live_changed)
         f.addRow("화면 갱신 (Hz)", self.hz_spin)
         f.addRow("스텝 지연", self.delay_spin)
+        hint = QLabel("학습 중에도 바로 반영됩니다.")
+        hint.setStyleSheet("color:#777")
+        f.addRow(hint)
         lay.addWidget(live)
 
         btns = QHBoxLayout()
@@ -379,6 +395,8 @@ class MainWindow(QMainWindow):
         self.prev_delay.setRange(0, 3000)
         self.prev_delay.setValue(300)
         self.prev_delay.setSuffix(" ms")
+        self.prev_delay.setToolTip("실행 중에도 바로 반영됩니다.")
+        self.prev_delay.valueChanged.connect(self._live_changed)
         self.prev_btn = QPushButton("▶ 실행")
         self.prev_btn.clicked.connect(self._start_preview)
         for x in (QLabel("정책"), self.policy_box, self.model_edit, browse, QLabel("에피소드"),
@@ -433,10 +451,21 @@ class MainWindow(QMainWindow):
         self.prev_btn.setEnabled(not busy)
         self.stop_btn.setEnabled(busy)
 
+    def _live_values(self, kind):
+        """[frame_hz, step_delay_s] shared with the running job."""
+        if kind == "train":
+            return [float(self.hz_spin.value()), self.delay_spin.value() / 1000.0]
+        return [0.0, self.prev_delay.value() / 1000.0]
+
+    def _live_changed(self):
+        if self.live is not None and self.job_kind is not None:
+            self.live[:] = self._live_values(self.job_kind)
+
     def _launch(self, target, job, kind):
         ctx = mp.get_context("spawn")
         self.q, self.stop_evt = ctx.Queue(), ctx.Event()
-        self.proc = ctx.Process(target=target, args=(job, self.q, self.stop_evt), daemon=True)
+        self.live = ctx.Array("d", self._live_values(kind))
+        self.proc = ctx.Process(target=target, args=(job, self.q, self.stop_evt, self.live), daemon=True)
         self.proc.start()
         self.job_kind = kind
         self._busy(True)
@@ -451,10 +480,10 @@ class MainWindow(QMainWindow):
                 return
         n = self.episodes_spin.value()
         job = {"overrides": self._overrides(), "algo": algo, "episodes": n, "seed": self.seed_spin.value(),
-               "out_dir": str(out), "label": label, "frame_hz": self.hz_spin.value(),
-               "step_delay": self.delay_spin.value() / 1000.0}
+               "out_dir": str(out), "label": label}
         self.ep_rows, self.ev_rows = [], []
         self.n_episodes, self.run_label, self.t_start = n, label, time.time()
+        self._setup_plots()
         self.progress.setRange(0, n)
         self.progress.setValue(0)
         self.summary_label.setText(f"학습 중: {label}")
@@ -479,7 +508,7 @@ class MainWindow(QMainWindow):
                 ov += [f"dqn.observation={d['observation']}", f"dqn.hidden={d['hidden']}",
                        f"dqn.conv_channels={d['conv_channels']}"]
         job = {"overrides": ov, "policy": policy, "model": model, "episodes": self.prev_eps.value(),
-               "seed": 100_000 + self.seed_spin.value(), "step_delay": self.prev_delay.value() / 1000.0}
+               "seed": 100_000 + self.seed_spin.value()}
         self.step_table.setRowCount(0)
         self.prev_results = []
         self.prev_summary.setText("실행 중…")
@@ -538,7 +567,8 @@ class MainWindow(QMainWindow):
             self._show_frame(frame)
         if self.job_kind == "train" and self.ep_rows:
             self._update_progress()
-        if self.plot_dirty and time.time() - self.last_plot > 1.0:
+        # redraw at most ~1/s, and never spend more than ~10% of the time drawing
+        if self.plot_dirty and time.time() - self.last_plot > max(1.0, 10 * self.plot_cost):
             self._draw_plots()
         if self.proc is not None and not self.proc.is_alive() and self.q is not None:
             try:
@@ -602,7 +632,7 @@ class MainWindow(QMainWindow):
             self.proc.join(timeout=2)
             if self.proc.is_alive():
                 self.proc.terminate()
-        self.proc = self.q = self.stop_evt = None
+        self.proc = self.q = self.stop_evt = self.live = None
         self.job_kind = None
         self._busy(False)
         if error:
@@ -633,42 +663,72 @@ class MainWindow(QMainWindow):
             self.status.setText("보상 테스트 완료")
 
     # ------------------------------------------------------------ plots
-    def _draw_plots(self, final=False):
-        self.last_plot, self.plot_dirty = time.time(), False
+    SERIES = [(0, "success", "Training success rate", "#2a6fdb"),
+              (2, "task_return", "Task return (without shaping)", "#3a9d5d"),
+              (3, "length", "Episode length (steps)", "#8a5cc2"),
+              (4, "epsilon", "Exploration ε", "#777777")]
+
+    def _setup_plots(self):
+        """Build the six panels once per run; later updates only swap the data,
+        which keeps the window responsive during long trainings."""
         ax = self.canvas.axes
+        self.lines = {}
         for a in ax:
             a.clear()
             a.grid(alpha=0.3)
-        if not self.ep_rows:
-            self.canvas.draw_idle()
-            return
-        ep = np.array([r["episode"] for r in self.ep_rows])
-        w = max(1, min(100, len(ep) // 10 or 1))
-
-        def series(i, key, title, color="#2a6fdb"):
-            y = np.array([r[key] for r in self.ep_rows], dtype=float)
-            ax[i].plot(ep, y, color=color, alpha=0.15, lw=0.8)
-            ax[i].plot(ep, moving_average(y, w), color=color, lw=2)
+            a.set_xlabel("episode", fontsize=8)
+            a.tick_params(labelsize=8)
+        for i, key, title, color in self.SERIES:
+            raw, = ax[i].plot([], [], color=color, alpha=0.15, lw=0.8)
+            ma, = ax[i].plot([], [], color=color, lw=2)
             ax[i].set_title(title, fontsize=10)
-            ax[i].set_xlabel("episode", fontsize=8)
-
-        series(0, "success", f"Training success rate (moving avg {w})")
-        if self.ev_rows:
-            ax[1].plot([r["episode"] for r in self.ev_rows], [r["success_rate"] for r in self.ev_rows],
-                       "o-", color="#e4572e", lw=2, ms=4)
+            self.lines[key] = (i, raw, ma)
+        self.eval_line, = ax[1].plot([], [], "o-", color="#e4572e", lw=2, ms=4)
+        ax[0].set_ylim(-0.03, 1.03)
         ax[1].set_ylim(-0.03, 1.03)
         ax[1].set_title("Greedy evaluation success rate", fontsize=10)
-        ax[1].set_xlabel("episode", fontsize=8)
-        series(2, "task_return", "Task return (without shaping)", "#3a9d5d")
-        series(3, "length", "Episode length (steps)", "#8a5cc2")
-        series(4, "epsilon", "Exploration ε", "#777777")
+        ax[5].set_title("Outcomes (last 20% of episodes)", fontsize=10)
+        self.outcome_names = None
+        self.canvas.fig.suptitle(self.run_label, fontsize=11)
+        self.canvas.relayout()
+
+    def _draw_plots(self, final=False):
+        t0 = time.perf_counter()
+        self.last_plot, self.plot_dirty = time.time(), False
+        if not self.ep_rows:
+            return
+        ax = self.canvas.axes
+        ep = np.array([r["episode"] for r in self.ep_rows], dtype=float)
+        w = max(1, min(100, len(ep) // 10 or 1))
+        stride = max(1, len(ep) // 3000)              # faint raw curve: thinned
+        for key, (i, raw, ma) in self.lines.items():
+            y = np.array([r[key] for r in self.ep_rows], dtype=float)
+            raw.set_data(ep[::stride], y[::stride])
+            ma.set_data(ep, moving_average(y, w))
+            ax[i].relim()
+            ax[i].autoscale_view(scaley=key != "success")
+        ax[0].set_title(f"Training success rate (moving avg {w})", fontsize=10)
+        if self.ev_rows:
+            self.eval_line.set_data([r["episode"] for r in self.ev_rows],
+                                    [r["success_rate"] for r in self.ev_rows])
+            ax[1].relim()
+            ax[1].autoscale_view(scaley=False)
         tail = self.ep_rows[-max(1, len(self.ep_rows) // 5):]
         names, counts = np.unique([r["outcome"] for r in tail], return_counts=True)
-        ax[5].bar(names, counts / counts.sum(), color="#2a6fdb")
-        ax[5].set_title("Outcomes (last 20% of episodes)", fontsize=10)
-        ax[5].tick_params(axis="x", labelrotation=30, labelsize=7)
+        a5 = ax[5]
+        a5.clear()
+        a5.grid(alpha=0.3)
+        a5.bar(names, counts / counts.sum(), color="#2a6fdb")
+        a5.set_title("Outcomes (last 20% of episodes)", fontsize=10)
+        a5.tick_params(axis="x", labelrotation=30, labelsize=7)
+        a5.tick_params(axis="y", labelsize=8)
         self.canvas.fig.suptitle(self.run_label + ("" if final else "  (training…)"), fontsize=11)
-        self.canvas.draw_idle()
+        if final or list(names) != self.outcome_names:  # new bar labels may need more margin
+            self.outcome_names = list(names)
+            self.canvas.relayout()
+        else:
+            self.canvas.draw()
+        self.plot_cost = time.perf_counter() - t0
 
     # ------------------------------------------------------------ compare
     def _refresh_runs(self):
