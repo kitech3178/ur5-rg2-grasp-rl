@@ -54,7 +54,13 @@ class DepthCamera:
         for obj in objects:
             t = np.minimum(t, obj.ray_cast(o, dirs))
         depth = t                                    # z-depth thanks to unit-z rays
-        if noise and rng is not None:
+        return self.add_noise(depth, rng if noise else None).reshape(self.H, self.W)
+
+    def add_noise(self, depth, rng=None):
+        """Stereo noise, dropout, quantization and the near/far range on a clean
+        z-depth image (also used for depth rendered by the simulator backends)."""
+        depth = np.asarray(depth, dtype=float)
+        if rng is not None:
             sigma = self.noise_base + self.noise_quad * depth ** 2
             depth = depth + rng.normal(size=depth.shape) * np.where(np.isfinite(sigma), sigma, 0)
             if self.dropout > 0:
@@ -62,7 +68,7 @@ class DepthCamera:
         if self.quant > 0:
             depth = np.round(depth / self.quant) * self.quant
         valid = np.isfinite(depth) & (depth >= self.near) & (depth <= self.far)
-        return np.where(valid, depth, 0.0).reshape(self.H, self.W).astype(np.float32)
+        return np.where(valid, depth, 0.0).astype(np.float32)
 
     def backproject(self, depth, T_world_cam):
         """Valid pixels -> (N, 3) world points and their (row, col) indices."""

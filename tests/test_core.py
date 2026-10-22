@@ -117,6 +117,42 @@ def test_q_learning_update():
     assert np.isclose(agent.Q[0, 1], 0.5)
 
 
+def test_mujoco_backend():
+    """MuJoCo model agrees with the DH kinematics / ray-cast camera, and grasps physically."""
+    try:
+        import mujoco  # noqa: F401
+    except ImportError:
+        print("skip test_mujoco_backend (pip install mujoco)")
+        return
+    from grasp_rl.backends.base import make_backend
+
+    cfg = load_config(None, ["backend=mujoco", "robot.execution_noise_std=0"])
+    b = make_backend(cfg)
+    try:
+        b.reset(np.random.default_rng(1))
+        tcp_mj = b.data.xpos[b.model.body("tcp").id]
+        assert np.allclose(tcp_mj, b.kin.tcp(b.joint_positions())[:3, 3], atol=1e-3)
+        b.renderer.update_scene(b.data, camera=b.cam_id, scene_option=b.scene_opt)
+        d_mj = b.camera.add_noise(b.renderer.render())
+        d_ray = b.camera.render(b.T_world_cam(), [b.obj], None, noise=False)
+        both = (d_mj > 0) & (d_ray > 0)
+        assert both.mean() > 0.9 and np.median(np.abs(d_mj - d_ray)[both]) < 0.002
+    finally:
+        b.close()
+    env = GraspEnv(cfg, "discrete")
+    agent = make_agent("scripted", cfg, env)
+    wins = 0
+    for ep in range(5):
+        obs, info = env.reset(seed=ep)
+        while True:
+            obs, r, te, tr, info = env.step(agent.act(obs))
+            if te or tr:
+                break
+        wins += info["success"]
+    env.close()
+    assert wins >= 4
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

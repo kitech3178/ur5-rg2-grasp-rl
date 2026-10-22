@@ -55,8 +55,13 @@ def evaluate(env, agent, n, seed_offset):
             "mean_length": float(np.mean([r["length"] for r in res]))}
 
 
-def train(cfg, algo, seed=0, out_dir=None, episodes=None, env=None, verbose=True, label=None):
-    """Train `algo` ('qlearning' | 'dqn') and write logs to `out_dir`."""
+def train(cfg, algo, seed=0, out_dir=None, episodes=None, env=None, verbose=True, label=None,
+          callback=None, recorder=None, should_stop=None):
+    """Train `algo` ('qlearning' | 'dqn') and write logs to `out_dir`.
+
+    Optional hooks (used by the GUI): `callback(kind, row)` with kind 'episode' / 'eval'
+    after each logged row, `recorder(env, a, r, info)` after every training step, and
+    `should_stop()` checked between episodes (stops early, still saves everything)."""
     acfg = cfg[algo]
     episodes = int(episodes or acfg.episodes)
     env = env or GraspEnv(cfg, observation_mode(algo, cfg))
@@ -77,21 +82,31 @@ def train(cfg, algo, seed=0, out_dir=None, episodes=None, env=None, verbose=True
     env_steps = 0
     recent = []
     ev_every, ev_n = int(cfg.eval.every), int(cfg.eval.episodes)
+    ev, done_ep = None, 0
     for ep in range(1, episodes + 1):
+        if should_stop is not None and should_stop():
+            break
+        done_ep = ep
         eps = agent.epsilon
-        r = run_episode(env, agent, explore=True, learn=True, seed=seed * 10_000_000 + ep)
+        r = run_episode(env, agent, explore=True, learn=True, seed=seed * 10_000_000 + ep,
+                        recorder=recorder)
         agent.end_episode()
         env_steps += r["length"]
         row = {"episode": ep, "env_steps": env_steps, "epsilon": round(eps, 4),
                "wall_time": round(time.time() - t0, 2), **r}
         w_ep.writerow(row)
+        if callback is not None:
+            callback("episode", row)
         recent.append(r)
         if ep % ev_every == 0 or ep == episodes:
             ev = evaluate(env, agent, ev_n, int(cfg.eval.seed_offset))
-            w_ev.writerow({"episode": ep, "env_steps": env_steps,
-                           "wall_time": round(time.time() - t0, 2), **ev})
+            ev_row = {"episode": ep, "env_steps": env_steps,
+                      "wall_time": round(time.time() - t0, 2), **ev}
+            w_ev.writerow(ev_row)
             f_ev.flush()
             f_ep.flush()
+            if callback is not None:
+                callback("eval", ev_row)
         if verbose and (ep % int(cfg.log.print_every) == 0 or ep == episodes):
             last = recent[-int(cfg.log.print_every):]
             msg = (f"[{algo} s{seed}] ep {ep:5d}/{episodes}  steps {env_steps:7d}  "
@@ -101,10 +116,18 @@ def train(cfg, algo, seed=0, out_dir=None, episodes=None, env=None, verbose=True
             if ep % ev_every == 0 or ep == episodes:
                 msg += f"  | eval success {ev['success_rate']:.2f}"
             print(msg, flush=True)
+    if ev is None or (done_ep and done_ep % ev_every and done_ep != episodes):
+        # stopped early: evaluate the policy as it is now so the summary is complete
+        ev = evaluate(env, agent, ev_n, int(cfg.eval.seed_offset))
+        ev_row = {"episode": done_ep, "env_steps": env_steps,
+                  "wall_time": round(time.time() - t0, 2), **ev}
+        w_ev.writerow(ev_row)
+        if callback is not None:
+            callback("eval", ev_row)
     f_ep.close()
     f_ev.close()
 
-    summary = {"algo": algo, "label": label, "seed": seed, "episodes": episodes, "env_steps": env_steps,
+    summary = {"algo": algo, "label": label, "seed": seed, "episodes": done_ep, "env_steps": env_steps,
                "wall_time_s": round(time.time() - t0, 1),
                "parameters": agent.num_parameters(), "final_eval": ev, **agent.stats()}
     with open(out / "summary.json", "w") as f:

@@ -16,7 +16,7 @@ def base_parser(description):
     p.add_argument("--config", default=None, help="extra YAML merged over configs/default.yaml")
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
                    help="override a config value, e.g. --set reward.success=20 (repeatable)")
-    p.add_argument("--backend", choices=["simple", "isaac"], default=None)
+    p.add_argument("--backend", choices=["simple", "mujoco", "isaac"], default=None)
     return p
 
 

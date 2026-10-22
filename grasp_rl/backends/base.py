@@ -72,6 +72,15 @@ class Backend(ABC):
     def object_state(self):
         """Ground-truth TableObject (pose, size, mass, friction)."""
 
+    # -- optional, for display only ---------------------------------------
+    def camera_rgb(self):
+        """(H, W, 3) uint8 colour view of the wrist camera, or None if not available."""
+        return None
+
+    def scene_rgb(self):
+        """(H, W, 3) uint8 overview of the robot and table, or None if not available."""
+        return None
+
     def close(self):
         pass
 
@@ -80,7 +89,10 @@ def make_backend(cfg) -> Backend:
     if cfg.backend == "simple":
         from grasp_rl.backends.simple_backend import SimpleBackend
         return SimpleBackend(cfg)
+    if cfg.backend == "mujoco":
+        from grasp_rl.backends.mujoco_backend import MujocoBackend
+        return MujocoBackend(cfg)
     if cfg.backend == "isaac":
         from grasp_rl.backends.isaac_backend import IsaacBackend
         return IsaacBackend(cfg)
-    raise ValueError(f"unknown backend {cfg.backend!r} (simple | isaac)")
+    raise ValueError(f"unknown backend {cfg.backend!r} (simple | mujoco | isaac)")

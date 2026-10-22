@@ -12,6 +12,7 @@ experiment:
 # ---------------------------------------------------------------------
 # 시뮬레이터 백엔드
 #   simple : 이 저장소에 들어 있는 물리 모델(numpy). 설치 없이 바로 동작, 빠름.
+#   mujoco : MuJoCo 강체 동역학 + 접촉/마찰 + OpenGL depth 카메라. pip 설치, CPU 동작.
 #   isaac  : NVIDIA Isaac Sim (PhysX) 위에서 같은 MDP를 실행.
 # ---------------------------------------------------------------------
 backend: simple
@@ -217,6 +218,33 @@ eval:
 log:
   print_every: 50
   save_model: true
+
+# ---------------------------------------------------------------------
+# MuJoCo 백엔드 설정 (backend: mujoco 일 때만 사용)
+# ---------------------------------------------------------------------
+mujoco:
+  timestep: 0.002                # 물리 스텝 (s)
+  impratio: 10.0                 # 마찰 제약 강성비 (클수록 미끄러짐이 적음, elliptic cone)
+  gl: null                       # MUJOCO_GL: null 이면 화면 있으면 glfw, 없으면 egl
+  viewer: false                  # true: 3D 뷰어 창으로 시뮬레이션 보기 (느려짐)
+  viewer_sync_every: 10          # 뷰어 갱신 주기 (물리 스텝)
+  realtime: true                 # viewer 사용 시 실시간 속도로 재생
+  render_robot_in_depth: false   # true: depth 이미지에 그리퍼도 보임 (perception 분할에 방해될 수 있음)
+  arm_kp: 5000.0                 # 팔 관절 위치 서보 (Nm/rad)
+  arm_kv: 300.0
+  arm_armature: 0.1
+  arm_joint_damping: 1.0
+  finger_kp: 2000.0              # 손가락 위치 서보 (N/m), 힘은 gripper.force 로 제한
+  finger_kv: 50.0
+  move_speed: 0.25               # 이동 한 번의 TCP 속도 (m/s) → 관절공간 보간 시간
+  yaw_speed: 2.0                 # rad/s
+  min_move_time: 0.05            # s
+  settle_steps: 200              # 보간 후 관절 오차 < joint_tol 까지 최대 대기 스텝
+  joint_tol: 0.0005
+  reset_settle_steps: 50
+  grip_settle_time: 0.2          # 닫은 뒤 / 놓은 뒤 대기 (s)
+  hold_time: 0.3                 # 들어올린 뒤 유지 (s) — 이 동안 떨어지면 실패
+  knock_threshold: 0.01          # 이동 후 물체가 이보다 많이 밀리면 충돌로 판정
 
 # ---------------------------------------------------------------------
 # Isaac Sim 백엔드 설정 (backend: isaac 일 때만 사용)
